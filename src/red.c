@@ -181,3 +181,28 @@ int red_enviar_resumen_descarga(const char *host, const char *token,
     return 0;
 }
 
+int red_enviar_analisis(const char *host, const char *token, const char *cuerpo_json) {
+    char url[512];
+    if (construir_url(url, sizeof(url), host, "/api/v1/respuestas/analisis") != 0) {
+        return -1;
+    }
+
+    long codigo_http = 0;
+    char *respuesta = ejecutar_http(url, token, cuerpo_json, &codigo_http);
+    if (!respuesta) {
+        return -1;
+    }
+
+    printf("Respuesta del servidor (HTTP %ld): %s\n", codigo_http, respuesta);
+
+    if (codigo_http < 200 || codigo_http >= 300) {
+        free(respuesta);
+        return -1;
+    }
+
+    free(respuesta);
+    return 0;
+}
+
+
+

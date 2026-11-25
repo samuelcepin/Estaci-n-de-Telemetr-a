@@ -11,5 +11,10 @@ char *red_obtener_lecturas(const char *host, const char *token, long long desde_
 int red_enviar_resumen_descarga(const char *host, const char *token,
                                 long long filas_unicas, long long suma_ids);
 
+/* Envia el JSON con las estadisticas SQL por maquina. Devuelve 0 si el servidor acepta (HTTP 2xx) */
+int red_enviar_analisis(const char *host, const char *token, const char *cuerpo_json);
+
 #endif
+
+
 

@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -251,6 +252,121 @@ static int ejecutar_descargar(void) {
     return (rc_envio == 0) ? 0 : 1;
 }
 
+static int agregar_texto(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int necesarios = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+
+    if (necesarios < 0) {
+        return -1;
+    }
+
+    size_t req = *len + (size_t)necesarios + 1;
+    if (req > *cap) {
+        size_t nueva_cap = (*cap == 0) ? 512 : *cap * 2;
+        while (nueva_cap < req) {
+            nueva_cap *= 2;
+        }
+        char *nuevo = realloc(*buf, nueva_cap);
+        if (!nuevo) {
+            return -1;
+        }
+        *buf = nuevo;
+        *cap = nueva_cap;
+    }
+
+    va_start(args, fmt);
+    vsnprintf(*buf + *len, *cap - *len, fmt, args);
+    va_end(args);
+    *len += (size_t)necesarios;
+    return 0;
+}
+
+static int ejecutar_analizar(void) {
+    const char *host = NULL;
+    const char *matricula = NULL;
+    const char *token = NULL;
+    if (validar_entorno(&host, &matricula, &token) != 0) {
+        return 1;
+    }
+
+    sqlite3 *db = NULL;
+    if (datos_abrir("estacion.db", &db) != 0) {
+        return 1;
+    }
+
+    double umbral_temp = 0.0;
+    if (datos_obtener_umbral_temp(db, &umbral_temp) != 0) {
+        datos_cerrar(db);
+        return 1;
+    }
+
+    EstadisticaMaquina *lista = NULL;
+    int total = 0;
+    if (datos_analizar_maquinas(db, umbral_temp, &lista, &total) != 0) {
+        datos_cerrar(db);
+        return 1;
+    }
+
+    datos_cerrar(db);
+
+    if (total == 0) {
+        fprintf(stderr, "Error: no hay lecturas en estacion.db. Ejecuta './estacion descargar' primero.\n");
+        free(lista);
+        return 1;
+    }
+
+    char *json = NULL;
+    size_t json_len = 0;
+    size_t json_cap = 0;
+
+    if (agregar_texto(&json, &json_len, &json_cap, "{") != 0) {
+        free(lista);
+        free(json);
+        return 1;
+    }
+
+    for (int i = 0; i < total; i++) {
+        const EstadisticaMaquina *m = &lista[i];
+        int rc = agregar_texto(
+            &json, &json_len, &json_cap,
+            "%s\"%s\":{\"validas\":%lld,\"descartadas\":%lld,"
+            "\"temp_min\":%.2f,\"temp_max\":%.2f,\"temp_prom\":%.2f,\"sobre_umbral\":%lld}",
+            (i > 0) ? "," : "",
+            m->maquina,
+            m->validas,
+            m->descartadas,
+            m->temp_min,
+            m->temp_max,
+            m->temp_prom,
+            m->sobre_umbral);
+
+        if (rc != 0) {
+            fprintf(stderr, "Error de memoria construyendo JSON de analisis.\n");
+            free(lista);
+            free(json);
+            return 1;
+        }
+    }
+
+    if (agregar_texto(&json, &json_len, &json_cap, "}") != 0) {
+        free(lista);
+        free(json);
+        return 1;
+    }
+
+    free(lista);
+
+    printf("Umbral de temperatura aplicado: %.2f\n", umbral_temp);
+    printf("JSON generado: %s\n", json);
+
+    int rc_envio = red_enviar_analisis(host, token, json);
+    free(json);
+
+    return (rc_envio == 0) ? 0 : 1;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <subcomando>\n", argv[0]);
@@ -265,7 +381,13 @@ int main(int argc, char *argv[]) {
         return ejecutar_descargar();
     }
 
+    if (strcmp(argv[1], "analizar") == 0) {
+        return ejecutar_analizar();
+    }
+
     fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     return 1;
 }
+
+
 
