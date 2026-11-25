@@ -1,12 +1,46 @@
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include <ctype.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "datos.h"
 #include "red.h"
 
 #define LIMITE_LOTE 200
+
+static volatile sig_atomic_t detener_programa = 0;
+
+static void manejar_senal(int sig) {
+    (void)sig;
+    detener_programa = 1;
+}
+
+#ifdef _WIN32
+static BOOL WINAPI manejar_consola_win(DWORD evento) {
+    if (evento == CTRL_C_EVENT || evento == CTRL_BREAK_EVENT || evento == CTRL_CLOSE_EVENT) {
+        detener_programa = 1;
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
+
+static void dormir_ms(unsigned int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    usleep(ms * 1000u);
+#endif
+}
 
 static int validar_entorno(const char **host, const char **matricula, const char **token) {
     *host = getenv("ITLA_HOST");
@@ -367,6 +401,153 @@ static int ejecutar_analizar(void) {
     return (rc_envio == 0) ? 0 : 1;
 }
 
+static void generar_lectura_simulada(long long seq, RegistroTelemetria *reg) {
+    reg->seq = seq;
+    reg->ts = (long long)time(NULL);
+    reg->temp = 27.50 + ((double)(rand() % 800) / 100.0);
+    reg->corriente = 10.50 + ((double)(rand() % 350) / 100.0);
+    reg->enviado = 0;
+    reg->intentos = 0;
+}
+
+static int ejecutar_enviar(int duracion_s) {
+    const char *host = NULL;
+    const char *matricula = NULL;
+    const char *token = NULL;
+    if (validar_entorno(&host, &matricula, &token) != 0) {
+        return 1;
+    }
+
+    sqlite3 *db = NULL;
+    if (datos_abrir("estacion.db", &db) != 0) {
+        return 1;
+    }
+
+    int intervalo_s = 0;
+    if (datos_obtener_intervalo_s(db, &intervalo_s) != 0) {
+        datos_cerrar(db);
+        return 1;
+    }
+
+    long long siguiente_seq = 1;
+    if (datos_siguiente_seq_telemetria(db, &siguiente_seq) != 0) {
+        datos_cerrar(db);
+        return 1;
+    }
+
+    detener_programa = 0;
+    signal(SIGINT, manejar_senal);
+    signal(SIGTERM, manejar_senal);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(manejar_consola_win, TRUE);
+#endif
+
+    srand((unsigned int)time(NULL));
+
+    time_t inicio = time(NULL);
+    time_t proximo_muestreo = inicio;
+    time_t proximo_envio = inicio;
+    int backoff_s = 1;
+
+    printf("Telemetria iniciada -> intervalo: %ds | siguiente seq: %lld (Ctrl+C para detener)\n",
+           intervalo_s, siguiente_seq);
+    fflush(stdout);
+
+    while (!detener_programa) {
+        time_t ahora = time(NULL);
+
+        if (duracion_s > 0 && (ahora - inicio) >= duracion_s) {
+            break;
+        }
+
+        /* 1. Generar y guardar nueva lectura cada intervalo_s sin bloquearse por red */
+        if (ahora >= proximo_muestreo) {
+            RegistroTelemetria nueva;
+            generar_lectura_simulada(siguiente_seq, &nueva);
+
+            if (datos_guardar_telemetria(db, &nueva) != 0) {
+                datos_cerrar(db);
+                return 1;
+            }
+
+            printf("[MUESTRA] seq=%lld ts=%lld temp=%.2f C corriente=%.2f A -> guardada en SQLite\n",
+                   nueva.seq, nueva.ts, nueva.temp, nueva.corriente);
+            fflush(stdout);
+
+            siguiente_seq++;
+            proximo_muestreo = ahora + intervalo_s;
+        }
+
+        /* 2. Si no estamos en ventana de espera (Retry-After/backoff), vaciar cola en orden seq */
+        if (ahora >= proximo_envio && !detener_programa) {
+            while (!detener_programa) {
+                RegistroTelemetria pendiente;
+                int hay_pendiente = 0;
+
+                if (datos_obtener_telemetria_pendiente(db, &pendiente, &hay_pendiente) != 0) {
+                    datos_cerrar(db);
+                    return 1;
+                }
+
+                if (!hay_pendiente) {
+                    break;
+                }
+
+                RespuestaTelemetria resp;
+                int rc = red_enviar_telemetria(host, token,
+                                               pendiente.seq, pendiente.ts,
+                                               pendiente.temp, pendiente.corriente,
+                                               &detener_programa, &resp);
+
+                if (detener_programa) {
+                    break;
+                }
+
+                if (rc == 0) {
+                    if (datos_marcar_telemetria_enviada(db, pendiente.seq) != 0) {
+                        datos_cerrar(db);
+                        return 1;
+                    }
+                    backoff_s = 1;
+                    printf("[ENVIO OK] seq=%lld aceptada (HTTP %ld)\n",
+                           pendiente.seq, resp.codigo_http);
+                    fflush(stdout);
+                } else if (rc == 1) {
+                    datos_registrar_intento_telemetria(db, pendiente.seq);
+                    int espera = (resp.retry_after_s > 0) ? resp.retry_after_s : backoff_s;
+                    if (resp.retry_after_s <= 0 && backoff_s < 60) {
+                        backoff_s *= 2;
+                        if (backoff_s > 60) backoff_s = 60;
+                    }
+                    proximo_envio = time(NULL) + espera;
+                    printf("[ESPERA HTTP %ld] seq=%lld retenida; reintento en %ds (muestreo sigue activo)\n",
+                           resp.codigo_http, pendiente.seq, espera);
+                    fflush(stdout);
+                    break;
+                } else {
+                    datos_registrar_intento_telemetria(db, pendiente.seq);
+                    int espera = backoff_s;
+                    if (backoff_s < 60) {
+                        backoff_s *= 2;
+                        if (backoff_s > 60) backoff_s = 60;
+                    }
+                    proximo_envio = time(NULL) + espera;
+                    printf("[ERROR RED] seq=%lld retenida; reintento en %ds (muestreo sigue activo)\n",
+                           pendiente.seq, espera);
+                    fflush(stdout);
+                    break;
+                }
+            }
+        }
+
+        dormir_ms(100);
+    }
+
+    printf("\nDeteniendo telemetria de forma limpia y cerrando SQLite...\n");
+    datos_cerrar(db);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <subcomando>\n", argv[0]);
@@ -385,9 +566,19 @@ int main(int argc, char *argv[]) {
         return ejecutar_analizar();
     }
 
+    if (strcmp(argv[1], "enviar") == 0) {
+        int duracion_s = 0;
+        if (argc >= 3) {
+            duracion_s = atoi(argv[2]);
+        }
+        return ejecutar_enviar(duracion_s);
+    }
+
     fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     return 1;
 }
+
+
 
 
 

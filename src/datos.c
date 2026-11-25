@@ -58,6 +58,24 @@ int datos_abrir(const char *ruta_db, sqlite3 **db_out) {
         return -1;
     }
 
+    const char *sql_telemetria =
+        "CREATE TABLE IF NOT EXISTS telemetria ("
+        "  seq INTEGER PRIMARY KEY,"
+        "  ts INTEGER NOT NULL,"
+        "  temp REAL NOT NULL,"
+        "  corriente REAL NOT NULL,"
+        "  enviado INTEGER NOT NULL DEFAULT 0,"
+        "  intentos INTEGER NOT NULL DEFAULT 0"
+        ");";
+
+    if (sqlite3_exec(*db_out, sql_telemetria, NULL, NULL, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "Error creando tabla telemetria: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        sqlite3_close(*db_out);
+        *db_out = NULL;
+        return -1;
+    }
+
     return 0;
 }
 
@@ -228,7 +246,6 @@ int datos_obtener_umbral_temp(sqlite3 *db, double *umbral_out) {
 
 int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
                             EstadisticaMaquina **lista_out, int *total_out) {
-    /* Fila valida: todos los campos presentes, estado == 'OK' y temp != -999.0 */
     #define COND_VALIDA \
         "(ts IS NOT NULL AND TRIM(ts) != '' " \
         "AND temp IS NOT NULL AND ABS(temp - (-999.0)) > 0.0001 " \
@@ -296,10 +313,177 @@ int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
     return 0;
 }
 
+int datos_obtener_intervalo_s(sqlite3 *db, int *intervalo_out) {
+    const char *sql = "SELECT valor FROM config WHERE clave = 'intervalo_s' LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando consulta intervalo_s: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "Error: intervalo_s no encontrado en config. Ejecuta './estacion config' primero.\n");
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    const unsigned char *texto = sqlite3_column_text(stmt, 0);
+    if (!texto) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    char *fin = NULL;
+    long val = strtol((const char *)texto, &fin, 10);
+    int valido = (fin != (const char *)texto && *fin == '\0' && val > 0 && val <= 3600);
+    sqlite3_finalize(stmt);
+
+    if (!valido) {
+        fprintf(stderr, "Error: valor de intervalo_s invalido en config.\n");
+        return -1;
+    }
+
+    *intervalo_out = (int)val;
+    return 0;
+}
+
+int datos_siguiente_seq_telemetria(sqlite3 *db, long long *seq_out) {
+    const char *sql = "SELECT COALESCE(MAX(seq), 0) + 1 FROM telemetria;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando consulta seq telemetria: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *seq_out = (long long)sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    fprintf(stderr, "Error obteniendo siguiente seq: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+}
+
+int datos_guardar_telemetria(sqlite3 *db, const RegistroTelemetria *reg) {
+    const char *sql =
+        "INSERT INTO telemetria (seq, ts, temp, corriente, enviado, intentos) "
+        "VALUES (?, ?, ?, ?, 0, 0);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando insercion telemetria: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)reg->seq);
+    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)reg->ts);
+    sqlite3_bind_double(stmt, 3, reg->temp);
+    sqlite3_bind_double(stmt, 4, reg->corriente);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error guardando telemetria seq=%lld: %s\n",
+                reg->seq, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
+int datos_obtener_telemetria_pendiente(sqlite3 *db, RegistroTelemetria *reg_out, int *hay_pendiente) {
+    const char *sql =
+        "SELECT seq, ts, temp, corriente, enviado, intentos "
+        "FROM telemetria WHERE enviado = 0 ORDER BY seq ASC LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando consulta pendiente: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        reg_out->seq = (long long)sqlite3_column_int64(stmt, 0);
+        reg_out->ts = (long long)sqlite3_column_int64(stmt, 1);
+        reg_out->temp = sqlite3_column_double(stmt, 2);
+        reg_out->corriente = sqlite3_column_double(stmt, 3);
+        reg_out->enviado = sqlite3_column_int(stmt, 4);
+        reg_out->intentos = sqlite3_column_int(stmt, 5);
+        *hay_pendiente = 1;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    if (rc == SQLITE_DONE) {
+        *hay_pendiente = 0;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    fprintf(stderr, "Error leyendo telemetria pendiente: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+}
+
+int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq) {
+    const char *sql =
+        "UPDATE telemetria SET enviado = 1, intentos = intentos + 1 WHERE seq = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando actualizacion enviada: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error marcando enviada seq=%lld: %s\n", seq, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
+int datos_registrar_intento_telemetria(sqlite3 *db, long long seq) {
+    const char *sql = "UPDATE telemetria SET intentos = intentos + 1 WHERE seq = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando actualizacion intento: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error registrando intento seq=%lld: %s\n", seq, sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
 void datos_cerrar(sqlite3 *db) {
     if (db) {
         sqlite3_close(db);
     }
 }
+
+
 
 

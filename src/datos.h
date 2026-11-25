@@ -26,6 +26,15 @@ typedef struct {
     long long sobre_umbral;
 } EstadisticaMaquina;
 
+typedef struct {
+    long long seq;
+    long long ts;
+    double temp;
+    double corriente;
+    int enviado;
+    int intentos;
+} RegistroTelemetria;
+
 int datos_abrir(const char *ruta_db, sqlite3 **db_out);
 int datos_guardar_config(sqlite3 *db, const char *clave, int len_clave,
                          const char *valor, int len_valor);
@@ -39,7 +48,15 @@ int datos_obtener_umbral_temp(sqlite3 *db, double *umbral_out);
 int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
                             EstadisticaMaquina **lista_out, int *total_out);
 
+int datos_obtener_intervalo_s(sqlite3 *db, int *intervalo_out);
+int datos_siguiente_seq_telemetria(sqlite3 *db, long long *seq_out);
+int datos_guardar_telemetria(sqlite3 *db, const RegistroTelemetria *reg);
+int datos_obtener_telemetria_pendiente(sqlite3 *db, RegistroTelemetria *reg_out, int *hay_pendiente);
+int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq);
+int datos_registrar_intento_telemetria(sqlite3 *db, long long seq);
+
 void datos_cerrar(sqlite3 *db);
 
 #endif
+
 
