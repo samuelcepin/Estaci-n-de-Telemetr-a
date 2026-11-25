@@ -29,28 +29,31 @@ static size_t escribir_callback(void *contenido, size_t size, size_t nmemb, void
     return total;
 }
 
-char *red_obtener_config(const char *host, const char *token) {
+static int construir_url(char *dest, size_t dest_tam, const char *host, const char *ruta) {
     size_t host_len = strlen(host);
     while (host_len > 0 && host[host_len - 1] == '/') {
         host_len--;
     }
 
-    char url[512];
     int escritos;
     if (strncmp(host, "http://", 7) == 0 || strncmp(host, "https://", 8) == 0) {
-        escritos = snprintf(url, sizeof(url), "%.*s/api/v1/config", (int)host_len, host);
+        escritos = snprintf(dest, dest_tam, "%.*s%s", (int)host_len, host, ruta);
     } else if (memchr(host, ':', host_len) != NULL) {
-        escritos = snprintf(url, sizeof(url), "http://%.*s/api/v1/config", (int)host_len, host);
+        escritos = snprintf(dest, dest_tam, "http://%.*s%s", (int)host_len, host, ruta);
     } else {
-        escritos = snprintf(url, sizeof(url), "http://%.*s:%d/api/v1/config",
-                            (int)host_len, host, PUERTO_API);
+        escritos = snprintf(dest, dest_tam, "http://%.*s:%d%s",
+                            (int)host_len, host, PUERTO_API, ruta);
     }
 
-    if (escritos < 0 || (size_t)escritos >= sizeof(url)) {
+    if (escritos < 0 || (size_t)escritos >= dest_tam) {
         fprintf(stderr, "Error: URL demasiado larga.\n");
-        return NULL;
+        return -1;
     }
+    return 0;
+}
 
+static char *ejecutar_http(const char *url, const char *token,
+                           const char *json_post, long *codigo_http_out) {
     BufferMemoria buf;
     buf.datos = malloc(1);
     if (!buf.datos) {
@@ -67,6 +70,14 @@ char *red_obtener_config(const char *host, const char *token) {
         return NULL;
     }
 
+    struct curl_slist *headers = NULL;
+    if (json_post != NULL) {
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_post);
+    }
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT_ESTACION);
     curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BEARER);
@@ -80,6 +91,9 @@ char *red_obtener_config(const char *host, const char *token) {
     long codigo_http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &codigo_http);
 
+    if (headers) {
+        curl_slist_free_all(headers);
+    }
     curl_easy_cleanup(curl);
     curl_global_cleanup();
 
@@ -89,11 +103,81 @@ char *red_obtener_config(const char *host, const char *token) {
         return NULL;
     }
 
-    if (codigo_http != 200) {
-        fprintf(stderr, "Error del servidor (HTTP %ld): %s\n", codigo_http, buf.datos);
-        free(buf.datos);
+    *codigo_http_out = codigo_http;
+    return buf.datos;
+}
+
+char *red_obtener_config(const char *host, const char *token) {
+    char url[512];
+    if (construir_url(url, sizeof(url), host, "/api/v1/config") != 0) {
         return NULL;
     }
 
-    return buf.datos;
+    long codigo_http = 0;
+    char *respuesta = ejecutar_http(url, token, NULL, &codigo_http);
+    if (!respuesta) {
+        return NULL;
+    }
+
+    if (codigo_http != 200) {
+        fprintf(stderr, "Error del servidor (HTTP %ld): %s\n", codigo_http, respuesta);
+        free(respuesta);
+        return NULL;
+    }
+
+    return respuesta;
 }
+
+char *red_obtener_lecturas(const char *host, const char *token, long long desde_id, int limite) {
+    char ruta[128];
+    snprintf(ruta, sizeof(ruta), "/api/v1/lecturas?desde_id=%lld&limite=%d", desde_id, limite);
+
+    char url[512];
+    if (construir_url(url, sizeof(url), host, ruta) != 0) {
+        return NULL;
+    }
+
+    long codigo_http = 0;
+    char *respuesta = ejecutar_http(url, token, NULL, &codigo_http);
+    if (!respuesta) {
+        return NULL;
+    }
+
+    if (codigo_http != 200) {
+        fprintf(stderr, "Error descargando lecturas (HTTP %ld): %s\n", codigo_http, respuesta);
+        free(respuesta);
+        return NULL;
+    }
+
+    return respuesta;
+}
+
+int red_enviar_resumen_descarga(const char *host, const char *token,
+                                long long filas_unicas, long long suma_ids) {
+    char url[512];
+    if (construir_url(url, sizeof(url), host, "/api/v1/respuestas/descarga") != 0) {
+        return -1;
+    }
+
+    char cuerpo_json[256];
+    snprintf(cuerpo_json, sizeof(cuerpo_json),
+             "{\"filas_unicas\":%lld,\"suma_ids\":%lld}",
+             filas_unicas, suma_ids);
+
+    long codigo_http = 0;
+    char *respuesta = ejecutar_http(url, token, cuerpo_json, &codigo_http);
+    if (!respuesta) {
+        return -1;
+    }
+
+    if (codigo_http < 200 || codigo_http >= 300) {
+        fprintf(stderr, "Error confirmando descarga (HTTP %ld): %s\n", codigo_http, respuesta);
+        free(respuesta);
+        return -1;
+    }
+
+    printf("Respuesta del servidor: %s\n", respuesta);
+    free(respuesta);
+    return 0;
+}
+
