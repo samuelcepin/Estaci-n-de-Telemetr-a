@@ -1,0 +1,31 @@
+# Carpeta de compilación y objetos intermedios
+build/
+*.o
+*.obj
+
+# Ejecutables compilados (Linux y Windows)
+estacion
+estacion.exe
+*.exe
+*.out
+
+# Base de datos SQLite y archivos temporales del modo WAL
+estacion.db
+estacion.db-wal
+estacion.db-shm
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# Variables de entorno locales y archivos sensibles
+.env
+*.env
+*.secret
+token.txt
+
+# Archivos temporales del sistema operativo y editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
