@@ -3,7 +3,7 @@
 /*  Nombre:    Samuel Cepin                                                          */
 /*  Matricula: 2024-0566                                                             */
 /*  Seccion:   Sabados                                                               */
-/*  Practica:  Practica                                                              */
+/*  Practica:  Estación de Telemetría                                                */
 /*  Fecha:     26/11/2026                                                            */
 /*  Link Practica: https://github.com/samuelcepin/Estaci-n-de-Telemetr-a             */
 /*************************************************************************************/
