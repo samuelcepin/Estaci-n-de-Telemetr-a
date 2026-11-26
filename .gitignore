@@ -29,3 +29,6 @@ token.txt
 Thumbs.db
 *.swp
 *~
+
+__pycache__/
+*.py[cod]

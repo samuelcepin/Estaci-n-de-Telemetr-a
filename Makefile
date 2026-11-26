@@ -25,7 +25,7 @@ OBJS = $(BUILD_DIR)/main.o \
 
 LDLIBS = -lcurl -lm -ldl -lpthread
 
-.PHONY: all run clean
+.PHONY: all run clean test test-local test-server
 
 all: $(TARGET)
 
@@ -45,7 +45,7 @@ $(BUILD_DIR)/sensor.o: src/sensor.c src/sensor.h src/datos.h $(SQLITE_H) | $(BUI
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(SQLITE_DIR) -c $< -o $@
 
 $(SQLITE_OBJ): $(SQLITE_C) $(SQLITE_H) | $(BUILD_DIR)
-	$(CC) -O2 -I$(SQLITE_DIR) -c $(SQLITE_C) -o $@
+	$(CC) -std=c11 -O0 -I$(SQLITE_DIR) -c $(SQLITE_C) -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -55,5 +55,14 @@ run: $(TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(TARGET).exe
+
+# Pruebas automatizadas: locales (sin credenciales) y remotas (solo lectura).
+test: test-local test-server
+
+test-local:
+	python3 -m unittest discover -s tests -p 'test_local.py' -v
+
+test-server:
+	python3 -m unittest discover -s tests -p 'test_server.py' -v
 
 
