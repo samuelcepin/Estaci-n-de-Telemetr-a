@@ -22,11 +22,33 @@ typedef struct {
 } ContextoSuscripcionMqtt;
 
 static int curl_inicializado = 0;
+static CURL *handle_http_reutilizable = NULL;
 
 static void asegurar_curl_global(void) {
     if (!curl_inicializado) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         curl_inicializado = 1;
+    }
+}
+
+static CURL *obtener_handle_http(void) {
+    asegurar_curl_global();
+    if (!handle_http_reutilizable) {
+        handle_http_reutilizable = curl_easy_init();
+    } else {
+        curl_easy_reset(handle_http_reutilizable);
+    }
+    return handle_http_reutilizable;
+}
+
+void red_limpiar(void) {
+    if (handle_http_reutilizable) {
+        curl_easy_cleanup(handle_http_reutilizable);
+        handle_http_reutilizable = NULL;
+    }
+    if (curl_inicializado) {
+        curl_global_cleanup();
+        curl_inicializado = 0;
     }
 }
 
@@ -132,7 +154,6 @@ static size_t escribir_mqtt_callback(void *contenido, size_t size, size_t nmemb,
     const char *payload_ptr = NULL;
     size_t payload_len = 0;
 
-    /* libcurl antepone 2 bytes (big-endian) con el largo del topico + el topico */
     if (total >= 2) {
         size_t topic_len = ((size_t)bytes[0] << 8) | (size_t)bytes[1];
         if (2 + topic_len <= total) {
@@ -225,8 +246,7 @@ static char *ejecutar_http(const char *url, const char *token,
         *retry_after_out = 0;
     }
 
-    asegurar_curl_global();
-    CURL *curl = curl_easy_init();
+    CURL *curl = obtener_handle_http();
     if (!curl) {
         free(buf.datos);
         return NULL;
@@ -246,8 +266,8 @@ static char *ejecutar_http(const char *url, const char *token,
     curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, escribir_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&buf);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
 
     if (retry_after_out) {
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, cabecera_callback);
@@ -267,7 +287,6 @@ static char *ejecutar_http(const char *url, const char *token,
     if (headers) {
         curl_slist_free_all(headers);
     }
-    curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
         if (!silenciar_error_red && res != CURLE_ABORTED_BY_CALLBACK) {
@@ -531,6 +550,7 @@ int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const cha
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&ctx);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(curl, CURLOPT_UPKEEP_INTERVAL_MS, 10000L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progreso_mqtt_callback);
@@ -556,6 +576,7 @@ int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const cha
 
     return -1;
 }
+
 
 
 

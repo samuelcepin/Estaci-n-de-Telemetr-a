@@ -24,7 +24,7 @@ int red_enviar_resumen_descarga(const char *host, const char *token,
 /* Envia el JSON con las estadisticas SQL por maquina. Devuelve 0 si el servidor acepta (HTTP 2xx) */
 int red_enviar_analisis(const char *host, const char *token, const char *cuerpo_json);
 
-/* Envia una lectura de telemetria.
+/* Envia una lectura de telemetria reutilizando el easy handle HTTP.
  * Devuelve:
  *   0  -> aceptada (HTTP 2xx)
  *   1  -> rechazada temporalmente por el servidor (ej. HTTP 503 con Retry-After)
@@ -48,12 +48,15 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
 int red_enviar_ack_alarma(const char *host, const char *token,
                           const char *codigo, const char *maquina, long long ts);
 
-/* Se suscribe a itla/planta/<matricula>/alarma y entrega cada payload a on_mensaje.
+/* Se suscribe a itla/planta/<matricula>/alarma con upkeep periodico.
  * Devuelve 0 si finalizo limpiamente por senal/tiempo, o -1 si se corto la conexion.
  */
 int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const char *token,
                               volatile sig_atomic_t *detener, time_t tiempo_limite,
                               AlarmaMqttCallback on_mensaje, void *user_data);
+
+/* Libera los handles persistentes de libcurl antes de salir */
+void red_limpiar(void);
 
 #endif
 

@@ -733,35 +733,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    int rc = 1;
     if (strcmp(argv[1], "config") == 0) {
-        return ejecutar_config();
+        rc = ejecutar_config();
+    } else if (strcmp(argv[1], "descargar") == 0) {
+        rc = ejecutar_descargar();
+    } else if (strcmp(argv[1], "analizar") == 0) {
+        rc = ejecutar_analizar();
+    } else if (strcmp(argv[1], "enviar") == 0) {
+        int duracion_s = (argc >= 3) ? atoi(argv[2]) : 0;
+        rc = ejecutar_enviar(duracion_s);
+    } else if (strcmp(argv[1], "escuchar") == 0) {
+        int duracion_s = (argc >= 3) ? atoi(argv[2]) : 0;
+        rc = ejecutar_escuchar(duracion_s);
+    } else {
+        fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     }
 
-    if (strcmp(argv[1], "descargar") == 0) {
-        return ejecutar_descargar();
-    }
-
-    if (strcmp(argv[1], "analizar") == 0) {
-        return ejecutar_analizar();
-    }
-
-    if (strcmp(argv[1], "enviar") == 0) {
-        int duracion_s = 0;
-        if (argc >= 3) {
-            duracion_s = atoi(argv[2]);
-        }
-        return ejecutar_enviar(duracion_s);
-    }
-
-    if (strcmp(argv[1], "escuchar") == 0) {
-        int duracion_s = 0;
-        if (argc >= 3) {
-            duracion_s = atoi(argv[2]);
-        }
-        return ejecutar_escuchar(duracion_s);
-    }
-
-    fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
-    return 1;
+    red_limpiar();
+    return rc;
 }
+
 
