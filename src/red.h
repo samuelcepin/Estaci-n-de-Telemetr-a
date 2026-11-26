@@ -43,10 +43,10 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
                              volatile sig_atomic_t *detener);
 
 /* Confirma la recepcion de una alarma via POST /api/v1/alarmas/ack.
- * Devuelve 0 si el servidor responde HTTP 2xx.
+ * Devuelve 0 si el servidor responde HTTP 2xx o 409 (ya confirmada).
  */
 int red_enviar_ack_alarma(const char *host, const char *token,
-                          const char *codigo, const char *maquina, long long ts);
+                          const char *codigo);
 
 /* Se suscribe a itla/planta/<matricula>/alarma con upkeep periodico.
  * Devuelve 0 si finalizo limpiamente por senal/tiempo, o -1 si se corto la conexion.
@@ -59,7 +59,6 @@ int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const cha
 void red_limpiar(void);
 
 #endif
-
 
 
 

@@ -14,7 +14,13 @@ int datos_abrir(const char *ruta_db, sqlite3 **db_out) {
         return -1;
     }
 
-    sqlite3_busy_timeout(*db_out, 2000);
+    if (sqlite3_busy_timeout(*db_out, 2000) != SQLITE_OK) {
+        fprintf(stderr, "Error configurando el tiempo de espera de SQLite: %s\n",
+                sqlite3_errmsg(*db_out));
+        sqlite3_close(*db_out);
+        *db_out = NULL;
+        return -1;
+    }
 
     char *err_msg = NULL;
     if (sqlite3_exec(*db_out, "PRAGMA journal_mode=WAL;", NULL, NULL, &err_msg) != SQLITE_OK) {
@@ -64,8 +70,8 @@ int datos_abrir(const char *ruta_db, sqlite3 **db_out) {
         "  ts INTEGER NOT NULL,"
         "  temp REAL NOT NULL,"
         "  corriente REAL NOT NULL,"
-        "  enviado INTEGER NOT NULL DEFAULT 0,"
-        "  intentos INTEGER NOT NULL DEFAULT 0"
+        "  enviado INTEGER NOT NULL DEFAULT 0 CHECK (enviado IN (0, 1)),"
+        "  intentos INTEGER NOT NULL DEFAULT 0 CHECK (intentos >= 0)"
         ");";
 
     if (sqlite3_exec(*db_out, sql_telemetria, NULL, NULL, &err_msg) != SQLITE_OK) {
@@ -108,8 +114,12 @@ int datos_guardar_config(sqlite3 *db, const char *clave, int len_clave,
         return -1;
     }
 
-    sqlite3_bind_text(stmt, 1, clave, len_clave, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, valor, len_valor, SQLITE_TRANSIENT);
+    if (sqlite3_bind_text(stmt, 1, clave, len_clave, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, valor, len_valor, SQLITE_TRANSIENT) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando parametros de config: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -154,43 +164,53 @@ int datos_guardar_lectura(sqlite3 *db, const LecturaPlanta *lectura) {
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)lectura->id);
+#define BIND_LECTURA(expr) do { \
+        if ((expr) != SQLITE_OK) { \
+            fprintf(stderr, "Error enlazando lectura: %s\n", sqlite3_errmsg(db)); \
+            sqlite3_finalize(stmt); \
+            return -1; \
+        } \
+    } while (0)
+
+    BIND_LECTURA(sqlite3_bind_int64(stmt, 1, (sqlite3_int64)lectura->id));
 
     if (lectura->maquina && lectura->maquina[0] != '\0') {
-        sqlite3_bind_text(stmt, 2, lectura->maquina, -1, SQLITE_TRANSIENT);
+        BIND_LECTURA(sqlite3_bind_text(stmt, 2, lectura->maquina, -1, SQLITE_TRANSIENT));
     } else {
-        sqlite3_bind_null(stmt, 2);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 2));
     }
 
     if (lectura->ts && lectura->ts[0] != '\0') {
-        sqlite3_bind_text(stmt, 3, lectura->ts, -1, SQLITE_TRANSIENT);
+        BIND_LECTURA(sqlite3_bind_text(stmt, 3, lectura->ts, -1, SQLITE_TRANSIENT));
     } else {
-        sqlite3_bind_null(stmt, 3);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 3));
     }
 
     if (lectura->tiene_temp) {
-        sqlite3_bind_double(stmt, 4, lectura->temp);
+        BIND_LECTURA(sqlite3_bind_double(stmt, 4, lectura->temp));
     } else {
-        sqlite3_bind_null(stmt, 4);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 4));
     }
 
     if (lectura->tiene_corriente) {
-        sqlite3_bind_double(stmt, 5, lectura->corriente);
+        BIND_LECTURA(sqlite3_bind_double(stmt, 5, lectura->corriente));
     } else {
-        sqlite3_bind_null(stmt, 5);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 5));
     }
 
     if (lectura->tiene_vibracion) {
-        sqlite3_bind_double(stmt, 6, lectura->vibracion);
+        BIND_LECTURA(sqlite3_bind_double(stmt, 6, lectura->vibracion));
     } else {
-        sqlite3_bind_null(stmt, 6);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 6));
     }
 
     if (lectura->estado && lectura->estado[0] != '\0') {
-        sqlite3_bind_text(stmt, 7, lectura->estado, -1, SQLITE_TRANSIENT);
+        BIND_LECTURA(sqlite3_bind_text(stmt, 7, lectura->estado, -1, SQLITE_TRANSIENT));
     } else {
-        sqlite3_bind_null(stmt, 7);
+        BIND_LECTURA(sqlite3_bind_null(stmt, 7));
     }
+
+#undef BIND_LECTURA
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -264,11 +284,11 @@ int datos_obtener_umbral_temp(sqlite3 *db, double *umbral_out) {
 int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
                             EstadisticaMaquina **lista_out, int *total_out) {
     #define COND_VALIDA \
-        "(ts IS NOT NULL AND TRIM(ts) != '' " \
-        "AND temp IS NOT NULL AND ABS(temp - (-999.0)) > 0.0001 " \
+        "(ts IS NOT NULL AND TRIM(ts) <> '' " \
+        "AND temp IS NOT NULL AND temp <> -999.0 " \
         "AND corriente IS NOT NULL " \
         "AND vibracion IS NOT NULL " \
-        "AND estado = 'OK')"
+        "AND COALESCE(estado, '') = 'OK')"
 
     const char *sql =
         "SELECT "
@@ -292,12 +312,17 @@ int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
         return -1;
     }
 
-    sqlite3_bind_double(stmt, 1, umbral_temp);
+    if (sqlite3_bind_double(stmt, 1, umbral_temp) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando umbral_temp: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     EstadisticaMaquina *lista = NULL;
     int total = 0;
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         EstadisticaMaquina *nueva = realloc(lista, (size_t)(total + 1) * sizeof(EstadisticaMaquina));
         if (!nueva) {
             fprintf(stderr, "Error de memoria leyendo estadisticas.\n");
@@ -321,6 +346,13 @@ int datos_analizar_maquinas(sqlite3 *db, double umbral_temp,
         item->sobre_umbral = (long long)sqlite3_column_int64(stmt, 6);
 
         total++;
+    }
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error ejecutando consulta de analisis: %s\n", sqlite3_errmsg(db));
+        free(lista);
+        sqlite3_finalize(stmt);
+        return -1;
     }
 
     sqlite3_finalize(stmt);
@@ -398,10 +430,14 @@ int datos_guardar_telemetria(sqlite3 *db, const RegistroTelemetria *reg) {
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)reg->seq);
-    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)reg->ts);
-    sqlite3_bind_double(stmt, 3, reg->temp);
-    sqlite3_bind_double(stmt, 4, reg->corriente);
+    if (sqlite3_bind_int64(stmt, 1, (sqlite3_int64)reg->seq) != SQLITE_OK ||
+        sqlite3_bind_int64(stmt, 2, (sqlite3_int64)reg->ts) != SQLITE_OK ||
+        sqlite3_bind_double(stmt, 3, reg->temp) != SQLITE_OK ||
+        sqlite3_bind_double(stmt, 4, reg->corriente) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando parametros de telemetria: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -481,7 +517,11 @@ int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq) {
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq);
+    if (sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando secuencia: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -503,7 +543,11 @@ int datos_registrar_intento_telemetria(sqlite3 *db, long long seq) {
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq);
+    if (sqlite3_bind_int64(stmt, 1, (sqlite3_int64)seq) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando secuencia de intento: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -525,7 +569,11 @@ int datos_alarma_ya_confirmada(sqlite3 *db, const char *codigo, int *confirmada_
         return -1;
     }
 
-    sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT);
+    if (sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando codigo de alarma: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
@@ -557,10 +605,14 @@ int datos_guardar_alarma(sqlite3 *db, const char *codigo, const char *maquina,
         return -1;
     }
 
-    sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, maquina, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)ts_servidor);
-    sqlite3_bind_int64(stmt, 4, (sqlite3_int64)ts_recibida);
+    if (sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, maquina, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int64(stmt, 3, (sqlite3_int64)ts_servidor) != SQLITE_OK ||
+        sqlite3_bind_int64(stmt, 4, (sqlite3_int64)ts_recibida) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando parametros de alarma: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -582,8 +634,12 @@ int datos_marcar_alarma_confirmada(sqlite3 *db, const char *codigo, long long ts
         return -1;
     }
 
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)ts_ack);
-    sqlite3_bind_text(stmt, 2, codigo, -1, SQLITE_TRANSIENT);
+    if (sqlite3_bind_int64(stmt, 1, (sqlite3_int64)ts_ack) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, codigo, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        fprintf(stderr, "Error enlazando confirmacion de alarma: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -601,6 +657,18 @@ void datos_cerrar(sqlite3 *db) {
         sqlite3_close(db);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

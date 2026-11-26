@@ -1,43 +1,51 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -Isrc -Ilib/sqlite
+CFLAGS = -std=c11 -Wall -Wextra -O2
+CPPFLAGS = -Isrc
 BUILD_DIR = build
 TARGET = estacion
 
-ifeq ($(OS),Windows_NT)
-	LDFLAGS = -lcurl
-	RM = rm -rf $(BUILD_DIR) $(TARGET) $(TARGET).exe
-else
-	LDFLAGS = -lcurl -lpthread -ldl
-	RM = rm -rf $(BUILD_DIR) $(TARGET)
+SQLITE_DIR = lib/sqlite
+SQLITE_C = $(SQLITE_DIR)/sqlite3.c
+SQLITE_H = $(SQLITE_DIR)/sqlite3.h
+SQLITE_OBJ = $(BUILD_DIR)/sqlite3.o
+
+# La entrega exige compilar la amalgamacion de SQLite como objeto separado.
+ifeq ($(wildcard $(SQLITE_C)),)
+    $(error Falta $(SQLITE_C). Debes incluir sqlite3.c y sqlite3.h en $(SQLITE_DIR))
+endif
+ifeq ($(wildcard $(SQLITE_H)),)
+    $(error Falta $(SQLITE_H). Debes incluir sqlite3.c y sqlite3.h en $(SQLITE_DIR))
 endif
 
 OBJS = $(BUILD_DIR)/main.o \
        $(BUILD_DIR)/red.o \
        $(BUILD_DIR)/datos.o \
        $(BUILD_DIR)/sensor.o \
-       $(BUILD_DIR)/sqlite3.o
+       $(SQLITE_OBJ)
+
+LDLIBS = -lcurl -lm -ldl -lpthread
 
 .PHONY: all run clean
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
+	$(CC) $(OBJS) -o $@ $(LDLIBS)
 
-$(BUILD_DIR)/main.o: src/main.c src/datos.h src/red.h src/sensor.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c src/main.c -o $(BUILD_DIR)/main.o
+$(BUILD_DIR)/main.o: src/main.c src/datos.h src/red.h src/sensor.h $(SQLITE_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(SQLITE_DIR) -c $< -o $@
 
 $(BUILD_DIR)/red.o: src/red.c src/red.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c src/red.c -o $(BUILD_DIR)/red.o
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/datos.o: src/datos.c src/datos.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c src/datos.c -o $(BUILD_DIR)/datos.o
+$(BUILD_DIR)/datos.o: src/datos.c src/datos.h $(SQLITE_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(SQLITE_DIR) -c $< -o $@
 
-$(BUILD_DIR)/sensor.o: src/sensor.c src/sensor.h src/datos.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c src/sensor.c -o $(BUILD_DIR)/sensor.o
+$(BUILD_DIR)/sensor.o: src/sensor.c src/sensor.h src/datos.h $(SQLITE_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I$(SQLITE_DIR) -c $< -o $@
 
-$(BUILD_DIR)/sqlite3.o: lib/sqlite/sqlite3.c lib/sqlite/sqlite3.h | $(BUILD_DIR)
-	$(CC) -O2 -Ilib/sqlite -c lib/sqlite/sqlite3.c -o $(BUILD_DIR)/sqlite3.o
+$(SQLITE_OBJ): $(SQLITE_C) $(SQLITE_H) | $(BUILD_DIR)
+	$(CC) -O2 -I$(SQLITE_DIR) -c $(SQLITE_C) -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -46,6 +54,6 @@ run: $(TARGET)
 	./$(TARGET) config
 
 clean:
-	$(RM)
+	rm -rf $(BUILD_DIR) $(TARGET) $(TARGET).exe
 
-	
+

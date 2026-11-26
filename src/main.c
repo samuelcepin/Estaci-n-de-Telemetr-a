@@ -8,6 +8,10 @@
 /*  Link Practica: https://github.com/samuelcepin/Estaci-n-de-Telemetr-a             */
 /*************************************************************************************/
 
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -16,6 +20,7 @@
 #endif
 
 #include <ctype.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -56,7 +61,12 @@ static void dormir_ms(unsigned int ms) {
 #ifdef _WIN32
     Sleep(ms);
 #else
-    usleep(ms * 1000u);
+    struct timespec req;
+    req.tv_sec = (time_t)(ms / 1000u);
+    req.tv_nsec = (long)(ms % 1000u) * 1000000L;
+    while (nanosleep(&req, &req) == -1 && errno == EINTR && !detener_programa) {
+        /* Continuar el tiempo restante, salvo que se haya solicitado detener. */
+    }
 #endif
 }
 
@@ -197,10 +207,22 @@ static int parsear_fila_csv(char *linea, LecturaPlanta *out) {
     return 0;
 }
 
+static void revertir_transaccion(sqlite3 *db) {
+    char *err_msg = NULL;
+    int rc = sqlite3_exec(db, "ROLLBACK;", NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error revirtiendo transaccion: %s\n",
+                err_msg ? err_msg : sqlite3_errmsg(db));
+    }
+    sqlite3_free(err_msg);
+}
+
 static int ejecutar_descargar(void) {
     const char *host = NULL;
     const char *matricula = NULL;
     const char *token = NULL;
+    (void)matricula;
+
     if (validar_entorno(&host, &matricula, &token) != 0) {
         return 1;
     }
@@ -210,20 +232,20 @@ static int ejecutar_descargar(void) {
         return 1;
     }
 
+    if (datos_iniciar_transaccion(db) != 0) {
+        datos_cerrar(db);
+        return 1;
+    }
+
     long long desde_id = 0;
     int numero_lote = 0;
+    int error = 0;
 
-    while (1) {
+    for (;;) {
         char *csv = red_obtener_lecturas(host, token, desde_id, LIMITE_LOTE);
         if (!csv) {
-            datos_cerrar(db);
-            return 1;
-        }
-
-        if (datos_iniciar_transaccion(db) != 0) {
-            free(csv);
-            datos_cerrar(db);
-            return 1;
+            error = 1;
+            break;
         }
 
         int filas_en_lote = 0;
@@ -245,17 +267,17 @@ static int ejecutar_descargar(void) {
 
             if (len > 0) {
                 if (es_primera_linea && !isdigit((unsigned char)p[0])) {
-                    es_primera_linea = 0;
+                    es_primera_linea = 0; /* Cabecera CSV. */
                 } else {
                     es_primera_linea = 0;
                     LecturaPlanta lectura;
                     if (parsear_fila_csv(p, &lectura) == 0) {
                         if (datos_guardar_lectura(db, &lectura) != 0) {
-                            datos_confirmar_transaccion(db);
-                            free(csv);
-                            datos_cerrar(db);
-                            return 1;
+                            error = 1;
+                            break;
                         }
+                        /* Cuenta filas recibidas, incluso si INSERT OR IGNORE
+                           descarta una repetida; esto determina el fin de página. */
                         filas_en_lote++;
                         if (lectura.id > max_id_lote) {
                             max_id_lote = lectura.id;
@@ -270,22 +292,38 @@ static int ejecutar_descargar(void) {
             p = fin_linea + 1;
         }
 
-        if (datos_confirmar_transaccion(db) != 0) {
-            free(csv);
-            datos_cerrar(db);
-            return 1;
-        }
-
         free(csv);
-
-        if (filas_en_lote == 0 || max_id_lote <= desde_id) {
+        if (error) {
             break;
         }
 
         numero_lote++;
-        printf("Lote %d procesado: %d filas (ultimo ID: %lld)\n",
+        printf("Lote %d procesado: %d filas recibidas (ultimo ID: %lld)\n",
                numero_lote, filas_en_lote, max_id_lote);
+
+        if (filas_en_lote < LIMITE_LOTE) {
+            break;
+        }
+
+        if (max_id_lote <= desde_id) {
+            fprintf(stderr, "Error: la paginacion no avanzo (desde_id=%lld).\n", desde_id);
+            error = 1;
+            break;
+        }
+
         desde_id = max_id_lote;
+    }
+
+    if (error) {
+        revertir_transaccion(db);
+        datos_cerrar(db);
+        return 1;
+    }
+
+    if (datos_confirmar_transaccion(db) != 0) {
+        revertir_transaccion(db);
+        datos_cerrar(db);
+        return 1;
     }
 
     long long filas_unicas = 0;
@@ -523,7 +561,10 @@ static int ejecutar_enviar(int duracion_s) {
                            pendiente.seq, resp.codigo_http);
                     fflush(stdout);
                 } else if (rc == 1) {
-                    datos_registrar_intento_telemetria(db, pendiente.seq);
+                    if (datos_registrar_intento_telemetria(db, pendiente.seq) != 0) {
+                        datos_cerrar(db);
+                        return 1;
+                    }
                     int espera = (resp.retry_after_s > 0) ? resp.retry_after_s : backoff_s;
                     if (resp.retry_after_s <= 0 && backoff_s < 30) {
                         backoff_s *= 2;
@@ -535,7 +576,10 @@ static int ejecutar_enviar(int duracion_s) {
                     fflush(stdout);
                     break;
                 } else {
-                    datos_registrar_intento_telemetria(db, pendiente.seq);
+                    if (datos_registrar_intento_telemetria(db, pendiente.seq) != 0) {
+                        datos_cerrar(db);
+                        return 1;
+                    }
                     int espera = backoff_s;
                     if (backoff_s < 30) {
                         backoff_s *= 2;
@@ -663,9 +707,11 @@ static void procesar_mensaje_alarma(const char *mensaje, void *user_data) {
            codigo, maquina, ts_servidor);
     fflush(stdout);
 
-    if (red_enviar_ack_alarma(ctx->host, ctx->token, codigo, maquina, ts_servidor) == 0) {
+    if (red_enviar_ack_alarma(ctx->host, ctx->token, codigo) == 0) {
         long long ts_ack = (long long)time(NULL);
-        datos_marcar_alarma_confirmada(ctx->db, codigo, ts_ack);
+        if (datos_marcar_alarma_confirmada(ctx->db, codigo, ts_ack) != 0) {
+            fprintf(stderr, "No se pudo guardar localmente la confirmacion de alarma %s.\n", codigo);
+        }
     }
 }
 
@@ -753,5 +799,8 @@ int main(int argc, char *argv[]) {
     red_limpiar();
     return rc;
 }
+
+
+
 
 

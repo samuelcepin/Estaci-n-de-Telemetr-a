@@ -1,5 +1,13 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "red.h"
 #include <ctype.h>
+#include <errno.h>
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -230,6 +238,46 @@ static void extraer_hostname(const char *host, char *dest, size_t dest_tam) {
     dest[len] = '\0';
 }
 
+static long long reloj_ms(void) {
+    struct timespec ahora;
+    if (timespec_get(&ahora, TIME_UTC) != TIME_UTC) {
+        return 0;
+    }
+    return (long long)ahora.tv_sec * 1000LL + (long long)(ahora.tv_nsec / 1000000L);
+}
+
+static void pausa_ms(unsigned int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec req;
+    req.tv_sec = (time_t)(ms / 1000u);
+    req.tv_nsec = (long)(ms % 1000u) * 1000000L;
+    while (nanosleep(&req, &req) == -1 && errno == EINTR) {
+        /* nanosleep interrumpido: completar la espera restante */
+    }
+#endif
+}
+
+/* La API limita a cinco peticiones por segundo por estudiante.
+   250 ms entre inicios deja margen para no disparar respuestas 429. */
+static void respetar_limite_http(void) {
+    static long long ultima_peticion_ms = 0;
+    long long ahora = reloj_ms();
+
+    if (ahora > 0 && ultima_peticion_ms > 0) {
+        long long transcurrido = ahora - ultima_peticion_ms;
+        if (transcurrido >= 0 && transcurrido < 250) {
+            pausa_ms((unsigned int)(250 - transcurrido));
+            ahora = reloj_ms();
+        }
+    }
+
+    if (ahora > 0) {
+        ultima_peticion_ms = ahora;
+    }
+}
+
 static char *ejecutar_http(const char *url, const char *token,
                            const char *json_post, long *codigo_http_out,
                            int *retry_after_out, volatile sig_atomic_t *detener,
@@ -268,6 +316,7 @@ static char *ejecutar_http(const char *url, const char *token,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&buf);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     if (retry_after_out) {
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, cabecera_callback);
@@ -280,6 +329,7 @@ static char *ejecutar_http(const char *url, const char *token,
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)detener);
     }
 
+    respetar_limite_http();
     CURLcode res = curl_easy_perform(curl);
     long codigo_http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &codigo_http);
@@ -455,7 +505,7 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
     }
 
     char payload[128];
-    snprintf(payload, sizeof(payload), "LATIDO;%lld;%lld;%lld", seq, pendientes, ts);
+    snprintf(payload, sizeof(payload), "LATIDO;%lld;%lld;%lld\n", seq, pendientes, ts);
 
     asegurar_curl_global();
     CURL *curl = curl_easy_init();
@@ -485,17 +535,18 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
     return (res == CURLE_OK) ? 0 : -1;
 }
 
-int red_enviar_ack_alarma(const char *host, const char *token,
-                          const char *codigo, const char *maquina, long long ts) {
+int red_enviar_ack_alarma(const char *host, const char *token, const char *codigo) {
     char url[512];
     if (construir_url(url, sizeof(url), host, "/api/v1/alarmas/ack") != 0) {
         return -1;
     }
 
-    char cuerpo_json[256];
-    snprintf(cuerpo_json, sizeof(cuerpo_json),
-             "{\"codigo\":\"%s\",\"maquina\":\"%s\",\"ts\":%lld}",
-             codigo, maquina, ts);
+    char cuerpo_json[160];
+    int escritos = snprintf(cuerpo_json, sizeof(cuerpo_json),
+                            "{\"codigo\":\"%s\"}", codigo);
+    if (escritos < 0 || (size_t)escritos >= sizeof(cuerpo_json)) {
+        return -1;
+    }
 
     long codigo_http = 0;
     char *respuesta = ejecutar_http(url, token, cuerpo_json, &codigo_http, NULL, NULL, 0);
@@ -503,15 +554,16 @@ int red_enviar_ack_alarma(const char *host, const char *token,
         return -1;
     }
 
-    if (codigo_http < 200 || codigo_http >= 300) {
-        fprintf(stderr, "Error confirmando alarma (HTTP %ld): %s\n", codigo_http, respuesta);
+    /* 409 significa que el servidor ya confirmó esa alarma: es idempotente. */
+    if ((codigo_http >= 200 && codigo_http < 300) || codigo_http == 409) {
+        printf("[ACK OK] HTTP %ld: %s\n", codigo_http, respuesta);
         free(respuesta);
-        return -1;
+        return 0;
     }
 
-    printf("[ACK OK] Respuesta del servidor: %s\n", respuesta);
+    fprintf(stderr, "Error confirmando alarma (HTTP %ld): %s\n", codigo_http, respuesta);
     free(respuesta);
-    return 0;
+    return -1;
 }
 
 int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const char *token,
