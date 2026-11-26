@@ -14,6 +14,13 @@ typedef struct {
     size_t tam;
 } BufferMemoria;
 
+typedef struct {
+    AlarmaMqttCallback on_mensaje;
+    void *user_data;
+    volatile sig_atomic_t *detener;
+    time_t tiempo_limite;
+} ContextoSuscripcionMqtt;
+
 static int curl_inicializado = 0;
 
 static void asegurar_curl_global(void) {
@@ -91,6 +98,70 @@ static int progreso_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow
         return 1;
     }
     return 0;
+}
+
+static int progreso_mqtt_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                  curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+
+    ContextoSuscripcionMqtt *ctx = (ContextoSuscripcionMqtt *)clientp;
+    if (!ctx) {
+        return 0;
+    }
+    if (ctx->detener && *(ctx->detener)) {
+        return 1;
+    }
+    if (ctx->tiempo_limite > 0 && time(NULL) >= ctx->tiempo_limite) {
+        return 1;
+    }
+    return 0;
+}
+
+static size_t escribir_mqtt_callback(void *contenido, size_t size, size_t nmemb, void *userp) {
+    size_t total = size * nmemb;
+    ContextoSuscripcionMqtt *ctx = (ContextoSuscripcionMqtt *)userp;
+
+    if (total == 0 || !ctx || !ctx->on_mensaje) {
+        return total;
+    }
+
+    const unsigned char *bytes = (const unsigned char *)contenido;
+    const char *payload_ptr = NULL;
+    size_t payload_len = 0;
+
+    /* libcurl antepone 2 bytes (big-endian) con el largo del topico + el topico */
+    if (total >= 2) {
+        size_t topic_len = ((size_t)bytes[0] << 8) | (size_t)bytes[1];
+        if (2 + topic_len <= total) {
+            payload_ptr = (const char *)(bytes + 2 + topic_len);
+            payload_len = total - (2 + topic_len);
+        }
+    }
+
+    if (!payload_ptr) {
+        payload_ptr = (const char *)bytes;
+        payload_len = total;
+    }
+
+    while (payload_len > 0 &&
+           (payload_ptr[payload_len - 1] == '\n' ||
+            payload_ptr[payload_len - 1] == '\r' ||
+            payload_ptr[payload_len - 1] == '\0')) {
+        payload_len--;
+    }
+
+    if (payload_len > 0) {
+        char msg[512];
+        size_t copiar = (payload_len < sizeof(msg) - 1) ? payload_len : (sizeof(msg) - 1);
+        memcpy(msg, payload_ptr, copiar);
+        msg[copiar] = '\0';
+        ctx->on_mensaje(msg, ctx->user_data);
+    }
+
+    return total;
 }
 
 static int construir_url(char *dest, size_t dest_tam, const char *host, const char *ruta) {
@@ -394,6 +465,99 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
 
     return (res == CURLE_OK) ? 0 : -1;
 }
+
+int red_enviar_ack_alarma(const char *host, const char *token,
+                          const char *codigo, const char *maquina, long long ts) {
+    char url[512];
+    if (construir_url(url, sizeof(url), host, "/api/v1/alarmas/ack") != 0) {
+        return -1;
+    }
+
+    char cuerpo_json[256];
+    snprintf(cuerpo_json, sizeof(cuerpo_json),
+             "{\"codigo\":\"%s\",\"maquina\":\"%s\",\"ts\":%lld}",
+             codigo, maquina, ts);
+
+    long codigo_http = 0;
+    char *respuesta = ejecutar_http(url, token, cuerpo_json, &codigo_http, NULL, NULL, 0);
+    if (!respuesta) {
+        return -1;
+    }
+
+    if (codigo_http < 200 || codigo_http >= 300) {
+        fprintf(stderr, "Error confirmando alarma (HTTP %ld): %s\n", codigo_http, respuesta);
+        free(respuesta);
+        return -1;
+    }
+
+    printf("[ACK OK] Respuesta del servidor: %s\n", respuesta);
+    free(respuesta);
+    return 0;
+}
+
+int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const char *token,
+                              volatile sig_atomic_t *detener, time_t tiempo_limite,
+                              AlarmaMqttCallback on_mensaje, void *user_data) {
+    char hostname[256];
+    extraer_hostname(host, hostname, sizeof(hostname));
+    if (hostname[0] == '\0') {
+        return -1;
+    }
+
+    char url[512];
+    int escritos = snprintf(url, sizeof(url),
+                            "mqtt://%s:%d/itla/planta/%s/alarma",
+                            hostname, PUERTO_MQTT, matricula);
+    if (escritos < 0 || (size_t)escritos >= sizeof(url)) {
+        return -1;
+    }
+
+    ContextoSuscripcionMqtt ctx;
+    ctx.on_mensaje = on_mensaje;
+    ctx.user_data = user_data;
+    ctx.detener = detener;
+    ctx.tiempo_limite = tiempo_limite;
+
+    asegurar_curl_global();
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        return -1;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERNAME, matricula);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, token);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, escribir_mqtt_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&ctx);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progreso_mqtt_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)&ctx);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res == CURLE_ABORTED_BY_CALLBACK) {
+        return 0;
+    }
+    if (detener && *detener) {
+        return 0;
+    }
+    if (tiempo_limite > 0 && time(NULL) >= tiempo_limite) {
+        return 0;
+    }
+
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[MQTT ESCUCHA] Desconectado (%s).\n", curl_easy_strerror(res));
+        return -1;
+    }
+
+    return -1;
+}
+
+
 
 
 

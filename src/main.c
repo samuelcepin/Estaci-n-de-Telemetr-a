@@ -1,3 +1,13 @@
+/*************************************************************************************/
+/*                  Programación para mecatrónicos                                   */
+/*  Nombre:    Samuel Cepin                                                          */
+/*  Matricula: 2024-0566                                                             */
+/*  Seccion:   Sabados                                                               */
+/*  Practica:  Practica                                                              */
+/*  Fecha:     26/11/2026                                                            */
+/*  Link Practica: https://github.com/samuelcepin/Estaci-n-de-Telemetr-a             */
+/*************************************************************************************/
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -17,6 +27,12 @@
 
 #define LIMITE_LOTE 200
 #define INTERVALO_LATIDO_S 10
+
+typedef struct {
+    sqlite3 *db;
+    const char *host;
+    const char *token;
+} ContextoEscucha;
 
 static volatile sig_atomic_t detener_programa = 0;
 
@@ -581,6 +597,142 @@ static int ejecutar_enviar(int duracion_s) {
     return 0;
 }
 
+static void procesar_mensaje_alarma(const char *mensaje, void *user_data) {
+    ContextoEscucha *ctx = (ContextoEscucha *)user_data;
+    if (!ctx || !mensaje) {
+        return;
+    }
+
+    if (strncmp(mensaje, "NINGUNA;", 8) == 0) {
+        return;
+    }
+
+    if (strncmp(mensaje, "ALARMA;", 7) != 0) {
+        return;
+    }
+
+    const char *p_codigo = mensaje + 7;
+    const char *sep1 = strchr(p_codigo, ';');
+    if (!sep1 || sep1 == p_codigo) {
+        return;
+    }
+
+    const char *p_maquina = sep1 + 1;
+    const char *sep2 = strchr(p_maquina, ';');
+    if (!sep2 || sep2 == p_maquina) {
+        return;
+    }
+
+    const char *p_ts = sep2 + 1;
+    if (*p_ts == '\0') {
+        return;
+    }
+
+    char codigo[64];
+    size_t len_cod = (size_t)(sep1 - p_codigo);
+    if (len_cod >= sizeof(codigo)) {
+        len_cod = sizeof(codigo) - 1;
+    }
+    memcpy(codigo, p_codigo, len_cod);
+    codigo[len_cod] = '\0';
+
+    char maquina[64];
+    size_t len_maq = (size_t)(sep2 - p_maquina);
+    if (len_maq >= sizeof(maquina)) {
+        len_maq = sizeof(maquina) - 1;
+    }
+    memcpy(maquina, p_maquina, len_maq);
+    maquina[len_maq] = '\0';
+
+    char *fin_ts = NULL;
+    long long ts = strtoll(p_ts, &fin_ts, 10);
+    if (fin_ts == p_ts || *fin_ts != '\0') {
+        return;
+    }
+
+    int ya_confirmada = 0;
+    if (datos_alarma_ya_confirmada(ctx->db, codigo, maquina, ts, &ya_confirmada) != 0) {
+        return;
+    }
+
+    if (ya_confirmada) {
+        printf("[ALARMA RETENIDA] codigo=%s maquina=%s ts=%lld -> ya confirmada, ignorada\n",
+               codigo, maquina, ts);
+        fflush(stdout);
+        return;
+    }
+
+    if (datos_guardar_alarma(ctx->db, codigo, maquina, ts) != 0) {
+        return;
+    }
+
+    printf("[ALARMA] codigo=%s maquina=%s ts=%lld -> guardada en SQLite, enviando ACK...\n",
+           codigo, maquina, ts);
+    fflush(stdout);
+
+    if (red_enviar_ack_alarma(ctx->host, ctx->token, codigo, maquina, ts) == 0) {
+        datos_marcar_alarma_confirmada(ctx->db, codigo, maquina, ts);
+    }
+}
+
+static int ejecutar_escuchar(int duracion_s) {
+    const char *host = NULL;
+    const char *matricula = NULL;
+    const char *token = NULL;
+    if (validar_entorno(&host, &matricula, &token) != 0) {
+        return 1;
+    }
+
+    sqlite3 *db = NULL;
+    if (datos_abrir("estacion.db", &db) != 0) {
+        return 1;
+    }
+
+    detener_programa = 0;
+    signal(SIGINT, manejar_senal);
+    signal(SIGTERM, manejar_senal);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(manejar_consola_win, TRUE);
+#endif
+
+    ContextoEscucha ctx;
+    ctx.db = db;
+    ctx.host = host;
+    ctx.token = token;
+
+    time_t limite = (duracion_s > 0) ? (time(NULL) + duracion_s) : 0;
+
+    printf("Escuchando alarmas en itla/planta/%s/alarma (Ctrl+C para detener)...\n", matricula);
+    fflush(stdout);
+
+    while (!detener_programa) {
+        if (limite > 0 && time(NULL) >= limite) {
+            break;
+        }
+
+        int rc = red_escuchar_alarmas_mqtt(host, matricula, token,
+                                           &detener_programa, limite,
+                                           procesar_mensaje_alarma, &ctx);
+
+        if (rc == 0 || detener_programa || (limite > 0 && time(NULL) >= limite)) {
+            break;
+        }
+
+        printf("[MQTT ESCUCHA] Reintentando conexion en 2s...\n");
+        fflush(stdout);
+        for (int i = 0; i < 20 && !detener_programa; i++) {
+            if (limite > 0 && time(NULL) >= limite) {
+                break;
+            }
+            dormir_ms(100);
+        }
+    }
+
+    printf("\nDeteniendo escucha de alarmas y cerrando SQLite...\n");
+    datos_cerrar(db);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <subcomando>\n", argv[0]);
@@ -607,9 +759,19 @@ int main(int argc, char *argv[]) {
         return ejecutar_enviar(duracion_s);
     }
 
+    if (strcmp(argv[1], "escuchar") == 0) {
+        int duracion_s = 0;
+        if (argc >= 3) {
+            duracion_s = atoi(argv[2]);
+        }
+        return ejecutar_escuchar(duracion_s);
+    }
+
     fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     return 1;
 }
+
+
 
 
 

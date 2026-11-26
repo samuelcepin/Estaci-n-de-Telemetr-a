@@ -76,6 +76,23 @@ int datos_abrir(const char *ruta_db, sqlite3 **db_out) {
         return -1;
     }
 
+    const char *sql_alarmas =
+        "CREATE TABLE IF NOT EXISTS alarmas ("
+        "  codigo TEXT NOT NULL,"
+        "  maquina TEXT NOT NULL,"
+        "  ts INTEGER NOT NULL,"
+        "  ack_enviado INTEGER NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY (codigo, maquina, ts)"
+        ");";
+
+    if (sqlite3_exec(*db_out, sql_alarmas, NULL, NULL, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "Error creando tabla alarmas: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        sqlite3_close(*db_out);
+        *db_out = NULL;
+        return -1;
+    }
+
     return 0;
 }
 
@@ -499,11 +516,99 @@ int datos_registrar_intento_telemetria(sqlite3 *db, long long seq) {
     return 0;
 }
 
+int datos_alarma_ya_confirmada(sqlite3 *db, const char *codigo, const char *maquina,
+                               long long ts, int *confirmada_out) {
+    const char *sql =
+        "SELECT ack_enviado FROM alarmas "
+        "WHERE codigo = ? AND maquina = ? AND ts = ? LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando consulta alarma: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, maquina, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)ts);
+
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *confirmada_out = (sqlite3_column_int(stmt, 0) == 1) ? 1 : 0;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    if (rc == SQLITE_DONE) {
+        *confirmada_out = 0;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    fprintf(stderr, "Error consultando alarma: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+}
+
+int datos_guardar_alarma(sqlite3 *db, const char *codigo, const char *maquina, long long ts) {
+    const char *sql =
+        "INSERT OR IGNORE INTO alarmas (codigo, maquina, ts, ack_enviado) "
+        "VALUES (?, ?, ?, 0);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando insercion alarma: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, maquina, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)ts);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error guardando alarma: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
+int datos_marcar_alarma_confirmada(sqlite3 *db, const char *codigo, const char *maquina, long long ts) {
+    const char *sql =
+        "UPDATE alarmas SET ack_enviado = 1 "
+        "WHERE codigo = ? AND maquina = ? AND ts = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando confirmacion alarma: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, codigo, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, maquina, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, (sqlite3_int64)ts);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Error marcando alarma confirmada: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
 void datos_cerrar(sqlite3 *db) {
     if (db) {
         sqlite3_close(db);
     }
 }
+
+
 
 
 

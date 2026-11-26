@@ -2,11 +2,14 @@
 #define RED_H
 
 #include <signal.h>
+#include <time.h>
 
 typedef struct {
     long codigo_http;      /* 200, 503, o 0 si hubo fallo de red */
     int retry_after_s;     /* Segundos indicados por Retry-After (0 si no viene) */
 } RespuestaTelemetria;
+
+typedef void (*AlarmaMqttCallback)(const char *mensaje, void *user_data);
 
 /* Devuelve un buffer dinamico con la respuesta HTTP 200 (liberar con free), o NULL si falla */
 char *red_obtener_config(const char *host, const char *token);
@@ -39,7 +42,21 @@ int red_publicar_latido_mqtt(const char *host, const char *matricula, const char
                              long long seq, long long pendientes, long long ts,
                              volatile sig_atomic_t *detener);
 
+/* Confirma la recepcion de una alarma via POST /api/v1/alarmas/ack.
+ * Devuelve 0 si el servidor responde HTTP 2xx.
+ */
+int red_enviar_ack_alarma(const char *host, const char *token,
+                          const char *codigo, const char *maquina, long long ts);
+
+/* Se suscribe a itla/planta/<matricula>/alarma y entrega cada payload a on_mensaje.
+ * Devuelve 0 si finalizo limpiamente por senal/tiempo, o -1 si se corto la conexion.
+ */
+int red_escuchar_alarmas_mqtt(const char *host, const char *matricula, const char *token,
+                              volatile sig_atomic_t *detener, time_t tiempo_limite,
+                              AlarmaMqttCallback on_mensaje, void *user_data);
+
 #endif
+
 
 
 

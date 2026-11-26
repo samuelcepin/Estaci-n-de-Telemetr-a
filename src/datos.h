@@ -56,9 +56,16 @@ int datos_contar_telemetria_pendiente(sqlite3 *db, long long *pendientes_out);
 int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq);
 int datos_registrar_intento_telemetria(sqlite3 *db, long long seq);
 
+int datos_alarma_ya_confirmada(sqlite3 *db, const char *codigo, const char *maquina,
+                               long long ts, int *confirmada_out);
+int datos_guardar_alarma(sqlite3 *db, const char *codigo, const char *maquina, long long ts);
+int datos_marcar_alarma_confirmada(sqlite3 *db, const char *codigo, const char *maquina, long long ts);
+
 void datos_cerrar(sqlite3 *db);
 
 #endif
+
+
 
 
 
