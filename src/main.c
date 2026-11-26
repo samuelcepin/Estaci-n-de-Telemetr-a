@@ -24,6 +24,7 @@
 #include <time.h>
 #include "datos.h"
 #include "red.h"
+#include "sensor.h"
 
 #define LIMITE_LOTE 200
 #define INTERVALO_LATIDO_S 10
@@ -418,15 +419,6 @@ static int ejecutar_analizar(void) {
     return (rc_envio == 0) ? 0 : 1;
 }
 
-static void generar_lectura_simulada(long long seq, RegistroTelemetria *reg) {
-    reg->seq = seq;
-    reg->ts = (long long)time(NULL);
-    reg->temp = 27.50 + ((double)(rand() % 800) / 100.0);
-    reg->corriente = 10.50 + ((double)(rand() % 350) / 100.0);
-    reg->enviado = 0;
-    reg->intentos = 0;
-}
-
 static int ejecutar_enviar(int duracion_s) {
     const char *host = NULL;
     const char *matricula = NULL;
@@ -459,7 +451,7 @@ static int ejecutar_enviar(int duracion_s) {
     SetConsoleCtrlHandler(manejar_consola_win, TRUE);
 #endif
 
-    srand((unsigned int)time(NULL));
+    sensor_inicializar();
 
     time_t inicio = time(NULL);
     time_t proximo_muestreo = inicio;
@@ -481,7 +473,7 @@ static int ejecutar_enviar(int duracion_s) {
         /* 1. Generar y guardar nueva lectura cada intervalo_s sin bloquearse por red */
         if (ahora >= proximo_muestreo) {
             RegistroTelemetria nueva;
-            generar_lectura_simulada(siguiente_seq, &nueva);
+            sensor_leer(siguiente_seq, &nueva);
 
             if (datos_guardar_telemetria(db, &nueva) != 0) {
                 datos_cerrar(db);
@@ -533,9 +525,9 @@ static int ejecutar_enviar(int duracion_s) {
                 } else if (rc == 1) {
                     datos_registrar_intento_telemetria(db, pendiente.seq);
                     int espera = (resp.retry_after_s > 0) ? resp.retry_after_s : backoff_s;
-                    if (resp.retry_after_s <= 0 && backoff_s < 60) {
+                    if (resp.retry_after_s <= 0 && backoff_s < 30) {
                         backoff_s *= 2;
-                        if (backoff_s > 60) backoff_s = 60;
+                        if (backoff_s > 30) backoff_s = 30;
                     }
                     proximo_envio = time(NULL) + espera;
                     printf("[ESPERA HTTP %ld] seq=%lld retenida; reintento en %ds (muestreo sigue activo)\n",
@@ -545,9 +537,9 @@ static int ejecutar_enviar(int duracion_s) {
                 } else {
                     datos_registrar_intento_telemetria(db, pendiente.seq);
                     int espera = backoff_s;
-                    if (backoff_s < 60) {
+                    if (backoff_s < 30) {
                         backoff_s *= 2;
-                        if (backoff_s > 60) backoff_s = 60;
+                        if (backoff_s > 30) backoff_s = 30;
                     }
                     proximo_envio = time(NULL) + espera;
                     printf("[ERROR RED] seq=%lld retenida; reintento en %ds (muestreo sigue activo)\n",
@@ -645,33 +637,35 @@ static void procesar_mensaje_alarma(const char *mensaje, void *user_data) {
     maquina[len_maq] = '\0';
 
     char *fin_ts = NULL;
-    long long ts = strtoll(p_ts, &fin_ts, 10);
+    long long ts_servidor = strtoll(p_ts, &fin_ts, 10);
     if (fin_ts == p_ts || *fin_ts != '\0') {
         return;
     }
 
     int ya_confirmada = 0;
-    if (datos_alarma_ya_confirmada(ctx->db, codigo, maquina, ts, &ya_confirmada) != 0) {
+    if (datos_alarma_ya_confirmada(ctx->db, codigo, &ya_confirmada) != 0) {
         return;
     }
 
     if (ya_confirmada) {
         printf("[ALARMA RETENIDA] codigo=%s maquina=%s ts=%lld -> ya confirmada, ignorada\n",
-               codigo, maquina, ts);
+               codigo, maquina, ts_servidor);
         fflush(stdout);
         return;
     }
 
-    if (datos_guardar_alarma(ctx->db, codigo, maquina, ts) != 0) {
+    long long ts_recibida = (long long)time(NULL);
+    if (datos_guardar_alarma(ctx->db, codigo, maquina, ts_servidor, ts_recibida) != 0) {
         return;
     }
 
     printf("[ALARMA] codigo=%s maquina=%s ts=%lld -> guardada en SQLite, enviando ACK...\n",
-           codigo, maquina, ts);
+           codigo, maquina, ts_servidor);
     fflush(stdout);
 
-    if (red_enviar_ack_alarma(ctx->host, ctx->token, codigo, maquina, ts) == 0) {
-        datos_marcar_alarma_confirmada(ctx->db, codigo, maquina, ts);
+    if (red_enviar_ack_alarma(ctx->host, ctx->token, codigo, maquina, ts_servidor) == 0) {
+        long long ts_ack = (long long)time(NULL);
+        datos_marcar_alarma_confirmada(ctx->db, codigo, ts_ack);
     }
 }
 
@@ -770,14 +764,4 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     return 1;
 }
-
-
-
-
-
-
-
-
-
-
 

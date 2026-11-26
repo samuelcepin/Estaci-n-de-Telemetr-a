@@ -1,38 +1,51 @@
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Isrc -Ilib/sqlite
-LDFLAGS = -lcurl
+BUILD_DIR = build
+TARGET = estacion
 
-ifneq ($(OS),Windows_NT)
-	LDFLAGS += -lpthread -ldl
+ifeq ($(OS),Windows_NT)
+	LDFLAGS = -lcurl
+	RM = rm -rf $(BUILD_DIR) $(TARGET) $(TARGET).exe
+else
+	LDFLAGS = -lcurl -lpthread -ldl
+	RM = rm -rf $(BUILD_DIR) $(TARGET)
 endif
 
-BUILD_DIR = build
-SRC_DIR = src
-SQLITE_SRC = lib/sqlite/sqlite3.c
-SQLITE_OBJ = $(BUILD_DIR)/sqlite3.o
-
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
-BIN = estacion
+OBJS = $(BUILD_DIR)/main.o \
+       $(BUILD_DIR)/red.o \
+       $(BUILD_DIR)/datos.o \
+       $(BUILD_DIR)/sensor.o \
+       $(BUILD_DIR)/sqlite3.o
 
 .PHONY: all run clean
 
-all: $(BIN)
+all: $(TARGET)
 
-$(BIN): $(OBJS) $(SQLITE_OBJ)
-	$(CC) $(OBJS) $(SQLITE_OBJ) -o $(BIN) $(LDFLAGS)
+$(TARGET): $(OBJS)
+	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/main.o: src/main.c src/datos.h src/red.h src/sensor.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c src/main.c -o $(BUILD_DIR)/main.o
 
-$(SQLITE_OBJ): $(SQLITE_SRC) | $(BUILD_DIR)
-	$(CC) -O2 -c $(SQLITE_SRC) -o $(SQLITE_OBJ)
+$(BUILD_DIR)/red.o: src/red.c src/red.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c src/red.c -o $(BUILD_DIR)/red.o
+
+$(BUILD_DIR)/datos.o: src/datos.c src/datos.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c src/datos.c -o $(BUILD_DIR)/datos.o
+
+$(BUILD_DIR)/sensor.o: src/sensor.c src/sensor.h src/datos.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c src/sensor.c -o $(BUILD_DIR)/sensor.o
+
+$(BUILD_DIR)/sqlite3.o: lib/sqlite/sqlite3.c lib/sqlite/sqlite3.h | $(BUILD_DIR)
+	$(CC) -O2 -Ilib/sqlite -c lib/sqlite/sqlite3.c -o $(BUILD_DIR)/sqlite3.o
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-run: all
-	./$(BIN) $(ARGS)
+run: $(TARGET)
+	./$(TARGET) config
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN) $(BIN).exe
+	$(RM)
+
+	
