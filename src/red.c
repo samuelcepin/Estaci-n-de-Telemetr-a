@@ -7,6 +7,7 @@
 
 #define USER_AGENT_ESTACION "estacion-itla/1.0"
 #define PUERTO_API 4000
+#define PUERTO_MQTT 1883
 
 typedef struct {
     char *datos;
@@ -113,6 +114,28 @@ static int construir_url(char *dest, size_t dest_tam, const char *host, const ch
         return -1;
     }
     return 0;
+}
+
+static void extraer_hostname(const char *host, char *dest, size_t dest_tam) {
+    const char *inicio = host;
+    if (strncmp(inicio, "http://", 7) == 0) {
+        inicio += 7;
+    } else if (strncmp(inicio, "https://", 8) == 0) {
+        inicio += 8;
+    } else if (strncmp(inicio, "mqtt://", 7) == 0) {
+        inicio += 7;
+    }
+
+    size_t len = 0;
+    while (inicio[len] != '\0' && inicio[len] != ':' && inicio[len] != '/') {
+        len++;
+    }
+
+    if (len >= dest_tam) {
+        len = dest_tam - 1;
+    }
+    memcpy(dest, inicio, len);
+    dest[len] = '\0';
 }
 
 static char *ejecutar_http(const char *url, const char *token,
@@ -323,6 +346,55 @@ int red_enviar_telemetria(const char *host, const char *token,
     }
     return 1;
 }
+
+int red_publicar_latido_mqtt(const char *host, const char *matricula, const char *token,
+                             long long seq, long long pendientes, long long ts,
+                             volatile sig_atomic_t *detener) {
+    char hostname[256];
+    extraer_hostname(host, hostname, sizeof(hostname));
+    if (hostname[0] == '\0') {
+        return -1;
+    }
+
+    char url[512];
+    int escritos = snprintf(url, sizeof(url),
+                            "mqtt://%s:%d/itla/estudiantes/%s/latido",
+                            hostname, PUERTO_MQTT, matricula);
+    if (escritos < 0 || (size_t)escritos >= sizeof(url)) {
+        return -1;
+    }
+
+    char payload[128];
+    snprintf(payload, sizeof(payload), "LATIDO;%lld;%lld;%lld", seq, pendientes, ts);
+
+    asegurar_curl_global();
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        return -1;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(payload));
+    curl_easy_setopt(curl, CURLOPT_USERNAME, matricula);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, token);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    if (detener) {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progreso_callback);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, (void *)detener);
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    return (res == CURLE_OK) ? 0 : -1;
+}
+
 
 
 

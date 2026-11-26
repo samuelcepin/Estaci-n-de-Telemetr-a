@@ -433,6 +433,27 @@ int datos_obtener_telemetria_pendiente(sqlite3 *db, RegistroTelemetria *reg_out,
     return -1;
 }
 
+int datos_contar_telemetria_pendiente(sqlite3 *db, long long *pendientes_out) {
+    const char *sql = "SELECT COUNT(*) FROM telemetria WHERE enviado = 0;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Error preparando conteo de pendientes: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *pendientes_out = (long long)sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    fprintf(stderr, "Error contando telemetria pendiente: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+    return -1;
+}
+
 int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq) {
     const char *sql =
         "UPDATE telemetria SET enviado = 1, intentos = intentos + 1 WHERE seq = ?;";
@@ -483,6 +504,9 @@ void datos_cerrar(sqlite3 *db) {
         sqlite3_close(db);
     }
 }
+
+
+
 
 
 

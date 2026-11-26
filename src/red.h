@@ -32,6 +32,13 @@ int red_enviar_telemetria(const char *host, const char *token,
                           volatile sig_atomic_t *detener,
                           RespuestaTelemetria *resp_out);
 
+/* Publica un latido MQTT QoS 0 en itla/estudiantes/<matricula>/latido.
+ * Devuelve 0 si se publico correctamente, o -1 si el broker no respondio.
+ */
+int red_publicar_latido_mqtt(const char *host, const char *matricula, const char *token,
+                             long long seq, long long pendientes, long long ts,
+                             volatile sig_atomic_t *detener);
+
 #endif
 
 

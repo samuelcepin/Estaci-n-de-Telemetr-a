@@ -16,6 +16,7 @@
 #include "red.h"
 
 #define LIMITE_LOTE 200
+#define INTERVALO_LATIDO_S 10
 
 static volatile sig_atomic_t detener_programa = 0;
 
@@ -355,7 +356,7 @@ static int ejecutar_analizar(void) {
     size_t json_len = 0;
     size_t json_cap = 0;
 
-    if (agregar_texto(&json, &json_len, &json_cap, "{") != 0) {
+    if (agregar_texto(&json, &json_len, &json_cap, "{\"maquinas\":[") != 0) {
         free(lista);
         free(json);
         return 1;
@@ -365,7 +366,7 @@ static int ejecutar_analizar(void) {
         const EstadisticaMaquina *m = &lista[i];
         int rc = agregar_texto(
             &json, &json_len, &json_cap,
-            "%s\"%s\":{\"validas\":%lld,\"descartadas\":%lld,"
+            "%s{\"maquina\":\"%s\",\"validas\":%lld,\"descartadas\":%lld,"
             "\"temp_min\":%.2f,\"temp_max\":%.2f,\"temp_prom\":%.2f,\"sobre_umbral\":%lld}",
             (i > 0) ? "," : "",
             m->maquina,
@@ -384,7 +385,7 @@ static int ejecutar_analizar(void) {
         }
     }
 
-    if (agregar_texto(&json, &json_len, &json_cap, "}") != 0) {
+    if (agregar_texto(&json, &json_len, &json_cap, "]}") != 0) {
         free(lista);
         free(json);
         return 1;
@@ -447,10 +448,11 @@ static int ejecutar_enviar(int duracion_s) {
     time_t inicio = time(NULL);
     time_t proximo_muestreo = inicio;
     time_t proximo_envio = inicio;
+    time_t proximo_latido = inicio;
     int backoff_s = 1;
 
-    printf("Telemetria iniciada -> intervalo: %ds | siguiente seq: %lld (Ctrl+C para detener)\n",
-           intervalo_s, siguiente_seq);
+    printf("Telemetria iniciada -> intervalo: %ds | latido MQTT: %ds | siguiente seq: %lld (Ctrl+C para detener)\n",
+           intervalo_s, INTERVALO_LATIDO_S, siguiente_seq);
     fflush(stdout);
 
     while (!detener_programa) {
@@ -540,6 +542,37 @@ static int ejecutar_enviar(int duracion_s) {
             }
         }
 
+        /* 3. Publicar latido MQTT QoS 0 cada 10 s (si el broker no responde, se descarta sin encolar) */
+        if (ahora >= proximo_latido && !detener_programa) {
+            long long pendientes = 0;
+            if (datos_contar_telemetria_pendiente(db, &pendientes) != 0) {
+                datos_cerrar(db);
+                return 1;
+            }
+
+            long long seq_actual = (siguiente_seq > 1) ? (siguiente_seq - 1) : 0;
+            long long ts_latido = (long long)time(NULL);
+
+            int rc_mqtt = red_publicar_latido_mqtt(host, matricula, token,
+                                                   seq_actual, pendientes, ts_latido,
+                                                   &detener_programa);
+
+            if (!detener_programa) {
+                if (rc_mqtt == 0) {
+                    printf("[LATIDO MQTT] publicado -> LATIDO;%lld;%lld;%lld\n",
+                           seq_actual, pendientes, ts_latido);
+                } else {
+                    printf("[LATIDO MQTT] broker sin respuesta, latido descartado (QoS 0)\n");
+                }
+                fflush(stdout);
+            }
+
+            time_t fin_latido = time(NULL);
+            proximo_latido = (fin_latido >= ahora + INTERVALO_LATIDO_S)
+                                 ? (fin_latido + 1)
+                                 : (ahora + INTERVALO_LATIDO_S);
+        }
+
         dormir_ms(100);
     }
 
@@ -577,6 +610,10 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Subcomando desconocido: %s\n", argv[1]);
     return 1;
 }
+
+
+
+
 
 
 

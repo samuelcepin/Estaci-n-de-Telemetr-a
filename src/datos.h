@@ -52,11 +52,14 @@ int datos_obtener_intervalo_s(sqlite3 *db, int *intervalo_out);
 int datos_siguiente_seq_telemetria(sqlite3 *db, long long *seq_out);
 int datos_guardar_telemetria(sqlite3 *db, const RegistroTelemetria *reg);
 int datos_obtener_telemetria_pendiente(sqlite3 *db, RegistroTelemetria *reg_out, int *hay_pendiente);
+int datos_contar_telemetria_pendiente(sqlite3 *db, long long *pendientes_out);
 int datos_marcar_telemetria_enviada(sqlite3 *db, long long seq);
 int datos_registrar_intento_telemetria(sqlite3 *db, long long seq);
 
 void datos_cerrar(sqlite3 *db);
 
 #endif
+
+
 
 
